@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
 import fs from 'fs';
 import { config } from '../config';
@@ -6,10 +6,10 @@ import { config } from '../config';
 const dbDir = path.dirname(config.dbPath);
 if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
 
-export const db = new Database(config.dbPath);
+export const db = new DatabaseSync(config.dbPath);
 
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+db.exec(`PRAGMA journal_mode = WAL`);
+db.exec(`PRAGMA foreign_keys = ON`);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -64,10 +64,10 @@ export interface GuildConfig {
 }
 
 export const userRepo = {
-  upsert(user: Omit<UserRow, never>) {
+  upsert(user: UserRow) {
     db.prepare(`
       INSERT INTO users (id, username, discriminator, global_name, email, avatar, access_token, refresh_token, token_expires_at, guilds, verified_at, verified_guild_id)
-      VALUES (@id, @username, @discriminator, @global_name, @email, @avatar, @access_token, @refresh_token, @token_expires_at, @guilds, @verified_at, @verified_guild_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         username = excluded.username,
         discriminator = excluded.discriminator,
@@ -80,7 +80,11 @@ export const userRepo = {
         guilds = excluded.guilds,
         verified_at = excluded.verified_at,
         verified_guild_id = excluded.verified_guild_id
-    `).run(user);
+    `).run(
+      user.id, user.username, user.discriminator, user.global_name,
+      user.email, user.avatar, user.access_token, user.refresh_token,
+      user.token_expires_at, user.guilds, user.verified_at, user.verified_guild_id
+    );
   },
 
   getById(id: string): UserRow | undefined {
@@ -88,7 +92,7 @@ export const userRepo = {
   },
 
   getAll(): UserRow[] {
-    return db.prepare('SELECT * FROM users ORDER BY verified_at DESC').all() as UserRow[];
+    return db.prepare('SELECT * FROM users ORDER BY verified_at DESC').all() as unknown as UserRow[];
   },
 
   search(query: string): UserRow[] {
@@ -97,7 +101,7 @@ export const userRepo = {
       SELECT * FROM users
       WHERE username LIKE ? OR global_name LIKE ? OR email LIKE ? OR id LIKE ?
       ORDER BY verified_at DESC
-    `).all(q, q, q, q) as UserRow[];
+    `).all(q, q, q, q) as unknown as UserRow[];
   },
 
   count(): number {
@@ -114,27 +118,27 @@ export const guildRepo = {
     return db.prepare('SELECT * FROM guild_configs WHERE guild_id = ?').get(guildId) as GuildConfig | undefined;
   },
 
-  upsert(config: Partial<GuildConfig> & { guild_id: string }) {
-    const existing = guildRepo.get(config.guild_id);
+  upsert(cfg: Partial<GuildConfig> & { guild_id: string }) {
+    const existing = guildRepo.get(cfg.guild_id);
     if (existing) {
-      const sets = Object.keys(config)
-        .filter(k => k !== 'guild_id')
-        .map(k => `${k} = @${k}`)
-        .join(', ');
-      db.prepare(`UPDATE guild_configs SET ${sets} WHERE guild_id = @guild_id`).run(config);
-    } else {
+      const merged = { ...existing, ...cfg };
       db.prepare(`
-        INSERT INTO guild_configs (guild_id, channel_id, role_id, message_id, embed_title, embed_description, embed_color)
-        VALUES (@guild_id, @channel_id, @role_id, @message_id, @embed_title, @embed_description, @embed_color)
-      `).run({
-        channel_id: null,
-        role_id: null,
-        message_id: null,
+        UPDATE guild_configs
+        SET channel_id=?, role_id=?, message_id=?, embed_title=?, embed_description=?, embed_color=?
+        WHERE guild_id=?
+      `).run(merged.channel_id, merged.role_id, merged.message_id, merged.embed_title, merged.embed_description, merged.embed_color, merged.guild_id);
+    } else {
+      const merged = {
+        channel_id: null, role_id: null, message_id: null,
         embed_title: 'Verificação',
         embed_description: 'Clica no botão abaixo para te verificares.',
         embed_color: '5865F2',
-        ...config,
-      });
+        ...cfg,
+      };
+      db.prepare(`
+        INSERT INTO guild_configs (guild_id, channel_id, role_id, message_id, embed_title, embed_description, embed_color)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(merged.guild_id, merged.channel_id, merged.role_id, merged.message_id, merged.embed_title, merged.embed_description, merged.embed_color);
     }
   },
 };
